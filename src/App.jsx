@@ -6,7 +6,6 @@ import { Chart as ChartJS, ArcElement, Tooltip, Legend } from "chart.js";
 ChartJS.register(ArcElement, Tooltip, Legend);
 
 const API_URL = "http://localhost:5000/api/expenses";
-
 const CATEGORY_ICONS = {
   Food: "🍔",
   Transport: "🚗",
