@@ -1,84 +1,116 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 import { Doughnut } from "react-chartjs-2";
-import {
-  Chart as ChartJS,
-  ArcElement,
-  Tooltip,
-  Legend,
-} from "chart.js";
+import { Chart as ChartJS, ArcElement, Tooltip, Legend } from "chart.js";
 
 ChartJS.register(ArcElement, Tooltip, Legend);
+
+const API_URL = "http://localhost:5000/api/expenses";
+
+const CATEGORY_ICONS = {
+  Food: "🍔",
+  Transport: "🚗",
+  Shopping: "🛍️",
+  Entertainment: "🎬",
+  Education: "📚",
+  Bills: "🧾",
+  Healthcare: "💊",
+  Others: "💳",
+};
+
+const normalizeExpense = (expense) => ({
+  ...expense,
+  id: expense._id,
+  date: expense.date ? String(expense.date).slice(0, 10) : "",
+});
+
+const getSavedBudget = () => {
+  try {
+    const saved = Number(localStorage.getItem("monthlyBudget"));
+    return saved > 0 ? saved : 10000;
+  } catch {
+    return 10000;
+  }
+};
+
 function App() {
+  // ---------- State (all hooks at the top) ----------
   const [expenses, setExpenses] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  
-  
-  // Fetch expenses from MongoDB through the backend
+  const [expenseToEdit, setExpenseToEdit] = useState(null);
+  const [monthlyBudget, setMonthlyBudget] = useState(getSavedBudget);
+  const [budgetInput, setBudgetInput] = useState(String(getSavedBudget()));
+
+  // ---------- Fetch expenses ----------
   useEffect(() => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+
     const fetchExpenses = async () => {
       try {
-        const response = await fetch("http://localhost:5000/api/expenses");
+        const response = await fetch(API_URL, { signal: controller.signal });
 
         if (!response.ok) {
           throw new Error("Failed to fetch expenses");
         }
 
         const data = await response.json();
-
-        // Convert MongoDB _id into the id used by our React components
-        const formattedExpenses = data.map((expense) => ({
-          ...expense,
-          id: expense._id,
-        }));
-
-        setExpenses(formattedExpenses);
-      } catch (error) {
-        console.error("Error fetching expenses:", error);
-        setError("Unable to load expenses. Please check your server connection.");
+        setExpenses(data.map(normalizeExpense));
+        setError("");
+      } catch (err) {
+        if (err.name === "AbortError") {
+          setError("Server took too long to respond. Is the backend running?");
+        } else {
+          console.error("Error fetching expenses:", err);
+          setError("Unable to load expenses. Please check your server connection.");
+        }
       } finally {
+        clearTimeout(timeoutId);
         setLoading(false);
       }
     };
 
     fetchExpenses();
+
+    return () => {
+      clearTimeout(timeoutId);
+      controller.abort();
+    };
   }, []);
 
-  
+  // ---------- Persist budget ----------
+  useEffect(() => {
+    try {
+      localStorage.setItem("monthlyBudget", String(monthlyBudget));
+    } catch {
+      // ignore storage errors
+    }
+  }, [monthlyBudget]);
 
-  const [expenseToEdit, setExpenseToEdit] = useState(null);
-
-  // Get current month and year
+  // ---------- Derived data ----------
   const currentDate = new Date();
   const currentMonth = currentDate.getMonth();
   const currentYear = currentDate.getFullYear();
 
-  // Filter expenses belonging to the current month
   const monthlyExpenses = expenses.filter((expense) => {
+    if (!expense.date) return false;
     const expenseDate = new Date(expense.date + "T00:00:00");
-
     return (
       expenseDate.getMonth() === currentMonth &&
       expenseDate.getFullYear() === currentYear
     );
   });
 
-  // Calculate total expenses for the current month
   const totalExpenses = monthlyExpenses.reduce(
     (total, expense) => total + Number(expense.amount),
     0
   );
 
-  // Calculate category-wise spending for the current month
   const categoryTotals = {};
-
   monthlyExpenses.forEach((expense) => {
-    if (categoryTotals[expense.category]) {
-      categoryTotals[expense.category] += Number(expense.amount);
-    } else {
-      categoryTotals[expense.category] = Number(expense.amount);
-    }
+    categoryTotals[expense.category] =
+      (categoryTotals[expense.category] || 0) + Number(expense.amount);
   });
 
   const chartData = {
@@ -102,38 +134,9 @@ function App() {
       },
     ],
   };
-  
-  const [monthlyBudget, setMonthlyBudget] = useState(() => {
-  const savedBudget = localStorage.getItem("monthlyBudget");
-  return savedBudget ? Number(savedBudget) : 10000;
-  });
 
-  const [budgetInput, setBudgetInput] = useState(String(monthlyBudget));
-
-  useEffect(() => {
-    localStorage.setItem("monthlyBudget", monthlyBudget);
-  }, [monthlyBudget]);
-
-  const updateBudget = (e) => {
-    e.preventDefault();
-
-    const newBudget = Number(budgetInput);
-
-    if (!budgetInput || newBudget <= 0) {
-      alert("Please enter a valid budget greater than zero.");
-      return;
-    }
-
-    setMonthlyBudget(newBudget);
-  };
-
-  const budgetPercentage = Math.min(
-    (totalExpenses / monthlyBudget) * 100,
-    100
-  );
-
-  const actualBudgetPercentage =
-    (totalExpenses / monthlyBudget) * 100;
+  const actualBudgetPercentage = (totalExpenses / monthlyBudget) * 100;
+  const budgetPercentage = Math.min(actualBudgetPercentage, 100);
 
   const budgetMessage =
     actualBudgetPercentage >= 100
@@ -144,13 +147,24 @@ function App() {
       ? "You have used more than half of your monthly budget."
       : "Your spending is within the budget.";
 
+  // ---------- Handlers ----------
+  const updateBudget = (e) => {
+    e.preventDefault();
+    const newBudget = Number(budgetInput);
+
+    if (!budgetInput || !(newBudget > 0)) {
+      alert("Please enter a valid budget greater than zero.");
+      return;
+    }
+
+    setMonthlyBudget(newBudget);
+  };
+
   const addExpense = async (expense) => {
     try {
-      const response = await fetch("http://localhost:5000/api/expenses", {
+      const response = await fetch(API_URL, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           amount: expense.amount,
           category: expense.category,
@@ -159,83 +173,59 @@ function App() {
         }),
       });
 
-      if (!response.ok) {
-        throw new Error("Failed to add expense");
-      }
+      if (!response.ok) throw new Error("Failed to add expense");
 
       const savedExpense = await response.json();
-
-      setExpenses((prevExpenses) => [
-        ...prevExpenses,
-        { ...savedExpense, id: savedExpense._id },
-      ]);
-    } catch (error) {
-      console.error("Error adding expense:", error);
+      setExpenses((prev) => [...prev, normalizeExpense(savedExpense)]);
+    } catch (err) {
+      console.error("Error adding expense:", err);
       alert("Unable to save expense. Please try again.");
     }
   };
 
   const updateExpense = async (updatedExpense) => {
     try {
-      const response = await fetch(
-        `http://localhost:5000/api/expenses/${updatedExpense.id}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            amount: updatedExpense.amount,
-            category: updatedExpense.category,
-            description: updatedExpense.description,
-            date: updatedExpense.date,
-          }),
-        }
-      );
+      const response = await fetch(`${API_URL}/${updatedExpense.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          amount: updatedExpense.amount,
+          category: updatedExpense.category,
+          description: updatedExpense.description,
+          date: updatedExpense.date,
+        }),
+      });
 
-      if (!response.ok) {
-        throw new Error("Failed to update expense");
-      }
+      if (!response.ok) throw new Error("Failed to update expense");
 
       const savedExpense = await response.json();
 
-      setExpenses((prevExpenses) =>
-        prevExpenses.map((expense) =>
-          expense.id === updatedExpense.id
-            ? { ...savedExpense, id: savedExpense._id }
-            : expense
+      setExpenses((prev) =>
+        prev.map((expense) =>
+          expense.id === updatedExpense.id ? normalizeExpense(savedExpense) : expense
         )
       );
 
       setExpenseToEdit(null);
-    } catch (error) {
-      console.error("Error updating expense:", error);
+    } catch (err) {
+      console.error("Error updating expense:", err);
       alert("Unable to update expense. Please try again.");
     }
   };
 
   const deleteExpense = async (id) => {
     try {
-      const response = await fetch(
-        `http://localhost:5000/api/expenses/${id}`,
-        {
-          method: "DELETE",
-        }
-      );
+      const response = await fetch(`${API_URL}/${id}`, { method: "DELETE" });
 
-      if (!response.ok) {
-        throw new Error("Failed to delete expense");
-      }
+      if (!response.ok) throw new Error("Failed to delete expense");
 
-      setExpenses((prevExpenses) =>
-        prevExpenses.filter((expense) => expense.id !== id)
-      );
+      setExpenses((prev) => prev.filter((expense) => expense.id !== id));
 
       if (expenseToEdit?.id === id) {
         setExpenseToEdit(null);
       }
-    } catch (error) {
-      console.error("Error deleting expense:", error);
+    } catch (err) {
+      console.error("Error deleting expense:", err);
       alert("Unable to delete expense. Please try again.");
     }
   };
@@ -247,29 +237,15 @@ function App() {
     }
 
     const headers = ["Date", "Description", "Category", "Amount"];
+    const rows = expenses.map((e) => [e.date, e.description, e.category, e.amount]);
 
-    const rows = expenses.map((expense) => [
-      expense.date,
-      expense.description,
-      expense.category,
-      expense.amount,
-    ]);
-
-    const csvContent = [
-      headers,
-      ...rows,
-    ]
+    const csvContent = [headers, ...rows]
       .map((row) =>
-        row
-          .map((value) => `"${String(value).replace(/"/g, '""')}"`)
-          .join(",")
+        row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(",")
       )
       .join("\n");
 
-    const blob = new Blob([csvContent], {
-      type: "text/csv;charset=utf-8;",
-    });
-
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
 
@@ -283,11 +259,13 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
+  // ---------- Render ----------
+  if (loading) {
+    return <div className="loading-message">Loading expenses...</div>;
+  }
+
   return (
-    loading ? (
-      <div className="loading-message">Loading expenses...</div>
-    ) : (
-      <div className="app">
+    <div className="app">
       <header className="header">
         <div>
           <h1>Smart Expense Manager</h1>
@@ -299,16 +277,14 @@ function App() {
           <span>My Account</span>
         </div>
       </header>
-      {error && (
-        <p className="error-message">{error}</p>
-      )}
+
+      {error && <p className="error-message">{error}</p>}
+
       <main className="container">
-
         <section className="summary-grid">
-
           <div className="summary-card">
             <p>Total Expenses</p>
-            <h2>₹{totalExpenses}</h2>
+            <h2>₹{totalExpenses.toLocaleString("en-IN")}</h2>
             <span>This month</span>
           </div>
 
@@ -318,27 +294,24 @@ function App() {
 
             <form onSubmit={updateBudget}>
               <input
-              type="number"
-              min="1"
-              placeholder="Enter monthly budget"
-              value={budgetInput}
-              onChange={(e) => setBudgetInput(e.target.value)}
+                type="number"
+                min="1"
+                placeholder="Enter monthly budget"
+                value={budgetInput}
+                onChange={(e) => setBudgetInput(e.target.value)}
               />
-
               <button type="submit">Update Budget</button>
             </form>
 
             <div className="progress-bar">
               <div
-              className="progress-fill"
-              style={{ width: `${budgetPercentage}%` }}
+                className="progress-fill"
+                style={{ width: `${budgetPercentage}%` }}
               ></div>
             </div>
 
             <span>{budgetPercentage.toFixed(1)}% used</span>
-            <p className="budget-message">
-              {budgetMessage}
-            </p>
+            <p className="budget-message">{budgetMessage}</p>
           </div>
 
           <div className="summary-card">
@@ -346,11 +319,9 @@ function App() {
             <h2>₹{(monthlyBudget - totalExpenses).toLocaleString("en-IN")}</h2>
             <span>Budget remaining</span>
           </div>
-
         </section>
 
         <section className="content-grid">
-
           <ExpenseForm
             onAddExpense={addExpense}
             onUpdateExpense={updateExpense}
@@ -359,16 +330,14 @@ function App() {
           />
 
           <ExpenseList
-          expenses={expenses}
-          onDelete={deleteExpense}
-          onEdit={setExpenseToEdit}
-          onExport={exportToCSV}
+            expenses={expenses}
+            onDelete={deleteExpense}
+            onEdit={setExpenseToEdit}
+            onExport={exportToCSV}
           />
-
         </section>
 
         <section className="card category-card">
-
           <div className="card-header">
             <h2>Spending by Category</h2>
             <p>See where your money is going</p>
@@ -380,16 +349,12 @@ function App() {
             <div className="category-chart">
               <div className="chart-container">
                 <Doughnut
-                data={chartData}
-                options={{
-                  responsive: true,
-                  maintainAspectRatio: false,
-                  plugins: {
-                    legend: {
-                      position: "bottom",
-                    },
-                  },
-                }}
+                  data={chartData}
+                  options={{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: "bottom" } },
+                  }}
                 />
               </div>
 
@@ -403,20 +368,13 @@ function App() {
               </div>
             </div>
           )}
-
         </section>
       </main>
     </div>
-  )
-);
+  );
 }
 
-function ExpenseForm({
-  onAddExpense,
-  onUpdateExpense,
-  expenseToEdit,
-  onCancelEdit,
-}) {
+function ExpenseForm({ onAddExpense, onUpdateExpense, expenseToEdit, onCancelEdit }) {
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("Food");
   const [description, setDescription] = useState("");
@@ -426,7 +384,7 @@ function ExpenseForm({
 
   useEffect(() => {
     if (expenseToEdit) {
-      setAmount(expenseToEdit.amount);
+      setAmount(String(expenseToEdit.amount));
       setCategory(expenseToEdit.category);
       setDescription(expenseToEdit.description);
       setDate(expenseToEdit.date);
@@ -448,7 +406,7 @@ function ExpenseForm({
     }
 
     const expense = {
-      id: expenseToEdit?.id ?? Date.now(),
+      id: expenseToEdit?.id,
       amount,
       category,
       description,
@@ -467,37 +425,27 @@ function ExpenseForm({
 
   return (
     <div className="card">
-
       <div className="card-header">
         <h2>{isEditing ? "Edit Expense" : "Add Expense"}</h2>
         <p>{isEditing ? "Update the selected expense" : "Record a new expense"}</p>
       </div>
 
       <form onSubmit={handleSubmit}>
-
         <label>Amount</label>
         <input
-        type="number"
-        min="0.01"
-        step="0.01"
-        placeholder="Enter amount"
-        value={amount}
-        onChange={(e) => setAmount(e.target.value)}
+          type="number"
+          min="0.01"
+          step="0.01"
+          placeholder="Enter amount"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
         />
 
         <label>Category</label>
-        <select
-          value={category}
-          onChange={(e) => setCategory(e.target.value)}
-        >
-          <option>Food</option>
-          <option>Transport</option>
-          <option>Shopping</option>
-          <option>Entertainment</option>
-          <option>Education</option>
-          <option>Bills</option>
-          <option>Healthcare</option>
-          <option>Others</option>
+        <select value={category} onChange={(e) => setCategory(e.target.value)}>
+          {Object.keys(CATEGORY_ICONS).map((c) => (
+            <option key={c}>{c}</option>
+          ))}
         </select>
 
         <label>Description</label>
@@ -509,16 +457,10 @@ function ExpenseForm({
         />
 
         <label>Date</label>
-        <input
-          type="date"
-          value={date}
-          onChange={(e) => setDate(e.target.value)}
-        />
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
 
         <div className="form-actions">
-          <button type="submit">
-            {isEditing ? "Save Changes" : "+ Add Expense"}
-          </button>
+          <button type="submit">{isEditing ? "Save Changes" : "+ Add Expense"}</button>
 
           {isEditing && (
             <button className="cancel-btn" type="button" onClick={onCancelEdit}>
@@ -526,9 +468,7 @@ function ExpenseForm({
             </button>
           )}
         </div>
-
       </form>
-
     </div>
   );
 }
@@ -536,81 +476,75 @@ function ExpenseForm({
 function ExpenseList({ expenses, onDelete, onEdit, onExport }) {
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [selectedMonth, setSelectedMonth] = useState("All");
+
   const sortedExpenses = [...expenses].sort(
     (a, b) => new Date(b.date) - new Date(a.date)
   );
+
   const filteredExpenses = sortedExpenses.filter((expense) => {
     const categoryMatch =
-      selectedCategory === "All" ||
-      expense.category === selectedCategory;
+      selectedCategory === "All" || expense.category === selectedCategory;
 
     const monthMatch =
-      selectedMonth === "All" ||
-      expense.date.startsWith(selectedMonth);
+      selectedMonth === "All" || (expense.date || "").startsWith(selectedMonth);
 
     return categoryMatch && monthMatch;
   });
 
   const availableMonths = [
-    ...new Set(expenses.map((expense) => expense.date.slice(0, 7))),
-  ].sort().reverse();
-  
+    ...new Set(expenses.filter((e) => e.date).map((e) => e.date.slice(0, 7))),
+  ]
+    .sort()
+    .reverse();
+
   return (
     <div className="card">
-
       <div className="card-header expense-header">
         <div>
           <h2>Recent Expenses</h2>
           <p>Your latest transactions</p>
         </div>
 
-        <button
-        className="export-btn"
-        onClick={onExport}
-        type="button"
-        >
+        <button className="export-btn" onClick={onExport} type="button">
           Export CSV
         </button>
       </div>
 
       <div className="expense-filters">
         <select
-        value={selectedCategory}
-        onChange={(e) => setSelectedCategory(e.target.value)}
+          value={selectedCategory}
+          onChange={(e) => setSelectedCategory(e.target.value)}
         >
           <option value="All">All Categories</option>
-          <option value="Food">Food</option>
-          <option value="Transport">Transport</option>
-          <option value="Shopping">Shopping</option>
-          <option value="Entertainment">Entertainment</option>
-          <option value="Education">Education</option>
-          <option value="Bills">Bills</option>
-          <option value="Healthcare">Healthcare</option>
-          <option value="Others">Others</option>
-        </select>
-
-        <select
-        value={selectedMonth}
-        onChange={(e) => setSelectedMonth(e.target.value)}
-        >
-          <option value="All">All Months</option>
-
-          {availableMonths.map((month) => (
-            <option key={month} value={month}>
-              {new Date(month + "-01T00:00:00").toLocaleDateString(
-                "en-IN",
-                { month: "long", year: "numeric" }
-              )}
+          {Object.keys(CATEGORY_ICONS).map((c) => (
+            <option key={c} value={c}>
+              {c}
             </option>
           ))}
         </select>
+
+        <select
+          value={selectedMonth}
+          onChange={(e) => setSelectedMonth(e.target.value)}
+        >
+          <option value="All">All Months</option>
+          {availableMonths.map((month) => (
+            <option key={month} value={month}>
+              {new Date(month + "-01T00:00:00").toLocaleDateString("en-IN", {
+                month: "long",
+                year: "numeric",
+              })}
+            </option>
+          ))}
+        </select>
+
         <button
-        type="button"
-        className="clear-filter-btn"
-        onClick={() => {
-          setSelectedCategory("All");
-          setSelectedMonth("All");
-        }}
+          type="button"
+          className="clear-filter-btn"
+          onClick={() => {
+            setSelectedCategory("All");
+            setSelectedMonth("All");
+          }}
         >
           Clear Filters
         </button>
@@ -624,18 +558,10 @@ function ExpenseList({ expenses, onDelete, onEdit, onExport }) {
         </div>
       ) : (
         <div className="expense-list">
-
           {filteredExpenses.map((expense) => (
             <div className="expense-item" key={expense.id}>
-
               <div className="expense-icon">
-                {expense.category === "Food"
-                  ? "🍔"
-                  : expense.category === "Transport"
-                  ? "🚗"
-                  : expense.category === "Shopping"
-                  ? "🛍️"
-                  : "💳"}
+                {CATEGORY_ICONS[expense.category] || "💳"}
               </div>
 
               <div className="expense-info">
@@ -648,27 +574,17 @@ function ExpenseList({ expenses, onDelete, onEdit, onExport }) {
               <strong>₹{expense.amount}</strong>
 
               <div className="expense-actions">
-                <button
-                  className="edit-btn"
-                  onClick={() => onEdit(expense)}
-                >
+                <button className="edit-btn" onClick={() => onEdit(expense)}>
                   Edit
                 </button>
-
-                <button
-                  className="delete-btn"
-                  onClick={() => onDelete(expense.id)}
-                >
+                <button className="delete-btn" onClick={() => onDelete(expense.id)}>
                   Delete
                 </button>
               </div>
-
             </div>
           ))}
-
         </div>
       )}
-
     </div>
   );
 }
